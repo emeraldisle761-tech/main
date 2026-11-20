@@ -44,3 +44,17 @@ The job's request `payload` (filenames, metadata, proof secrets) and internal
 underscore-prefixed fields (trace links, throttle state) are stripped by
 `public_job_view` before the job is returned. Progress values are phase names
 and numbers only and carry no payload data.
+
+## Failure diagnostics
+
+When a job fails, the exception text and traceback frames are sanitized before
+they reach the logger or the job-failure record:
+
+- Private filesystem paths are replaced with `<path>`.
+- Secret-shaped values (tokens, keys, passwords, `Bearer` credentials) are
+  replaced with `<redacted>`.
+- Each diagnostic string is capped at a fixed byte budget and truncated with a
+  `…[truncated]` marker when it exceeds it.
+
+Sanitized diagnostics are stored in the job's `result` error fields; the raw
+exception is never persisted.

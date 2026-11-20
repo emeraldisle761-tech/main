@@ -1,6 +1,7 @@
 import logging
 import time
 import os
+import re
 from logging_utils import log_structured
 import threading
 import traceback
@@ -38,6 +39,42 @@ if not LOGGER.handlers:
 LOGGER.setLevel(logging.INFO)
 
 WORKER_ID = f"worker-{os.getpid()}"
+
+DIAGNOSTIC_MAX_BYTES = 2048
+DIAGNOSTIC_MAX_FRAMES = 20
+
+_PRIVATE_PATH_RE = re.compile(r"(?:/(?:home|Users|root|var|tmp|srv|opt|mnt)/[^\s'\"]*)")
+_SECRET_RE = re.compile(
+    r"(?i)((?:secret|token|password|passwd|api[_-]?key|authorization|credential)[\w-]*\s*[=:]\s*)(\S+)"
+)
+_LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{32,}\b")
+
+
+def _redact_diagnostic_text(text: str) -> str:
+    text = _SECRET_RE.sub(r"\1[REDACTED]", text)
+    text = _PRIVATE_PATH_RE.sub("[PATH]", text)
+    text = _LONG_TOKEN_RE.sub("[REDACTED]", text)
+    return text
+
+
+def _cap_bytes(text: str, limit: int = DIAGNOSTIC_MAX_BYTES) -> str:
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore") + "...[truncated]"
+
+
+def sanitize_exception_text(err: BaseException) -> str:
+    """Return bounded, redacted text describing an exception."""
+    return _cap_bytes(_redact_diagnostic_text(str(err)))
+
+
+def sanitize_traceback(err: BaseException) -> str:
+    """Return bounded, redacted traceback text; frames are capped and redacted."""
+    frames = traceback.format_exception(type(err), err, err.__traceback__)
+    frames = frames[-DIAGNOSTIC_MAX_FRAMES:]
+    text = "".join(frames)
+    return _cap_bytes(_redact_diagnostic_text(text))
 
 @traced_job("job.media.embed")
 def process_embed(job: dict) -> dict:
@@ -311,12 +348,13 @@ def run_worker(
                     complete_job(job_id, res)
                     LOGGER.info(f"Completed job {job_id}")
                 except Exception as err:
-                    LOGGER.error(f"Failed job {job_id}: {err}")
-                    LOGGER.error(traceback.format_exc())
+                    safe_message = sanitize_exception_text(err)
+                    LOGGER.error(f"Failed job {job_id}: {safe_message}")
+                    LOGGER.error(sanitize_traceback(err))
                     is_fatal = isinstance(err, ValueError) and job_type != "verify_tx"
                     if job_type == "verify_tx":
                         is_fatal = isinstance(err, ValueError)
-                    fail_job(job_id, str(err), is_fatal=is_fatal)
+                    fail_job(job_id, safe_message, is_fatal=is_fatal)
                 finally:
                     hb_stop_event.set()
                     hb_thread.join()

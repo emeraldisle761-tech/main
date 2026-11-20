@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import logging
+import re
 import os
 import time
 from contextlib import contextmanager
@@ -63,6 +64,32 @@ _TRANSIENT_MESSAGE_FRAGMENTS = (
     "couldn't connect to compute",
     "error connecting to compute node",
 )
+
+# Diagnostic bounds for worker exception text persisted on job failure.
+JOB_ERROR_MAX_BYTES = 2048
+_JOB_ERROR_REDACTED = "[redacted]"
+_PRIVATE_PATH_RE = re.compile(r"(?:/(?:home|Users|root|tmp|var|srv|opt|etc)/[^\s'\"]*)")
+_SECRET_SHAPED_RE = re.compile(
+    r"(?i)((?:password|passwd|secret|token|api[_-]?key|authorization|bearer)\s*[=:]?\s*)\S+"
+)
+_LONG_HEX_RE = re.compile(r"\b[0-9a-fA-F]{40,}\b")
+
+
+def sanitize_job_error(error: object) -> str:
+    """Return a bounded, redacted diagnostic string for job-failure storage.
+
+    Strips private filesystem paths and secret-shaped values and caps the
+    result at ``JOB_ERROR_MAX_BYTES`` UTF-8 bytes so arbitrary exception text
+    cannot bloat storage or leak credentials.
+    """
+    text = str(error) if error is not None else ""
+    text = _PRIVATE_PATH_RE.sub(_JOB_ERROR_REDACTED, text)
+    text = _SECRET_SHAPED_RE.sub(lambda m: m.group(1) + _JOB_ERROR_REDACTED, text)
+    text = _LONG_HEX_RE.sub(_JOB_ERROR_REDACTED, text)
+    encoded = text.encode("utf-8")
+    if len(encoded) > JOB_ERROR_MAX_BYTES:
+        text = encoded[:JOB_ERROR_MAX_BYTES].decode("utf-8", errors="ignore")
+    return text
 
 
 def encode_proof_events_cursor(event_id: int) -> str:
@@ -1293,7 +1320,7 @@ def fail_job(job_id: int, error: str, *, is_fatal: bool = False) -> None:
     job = _JOBS.get(job_id)
     if not job:
         return
-    job["error"] = error
+    job["error"] = sanitize_job_error(error)
     job["failed_at"] = datetime.now(timezone.utc).isoformat()
     if is_fatal:
         job["status"] = "failed"
