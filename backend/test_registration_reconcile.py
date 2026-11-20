@@ -112,6 +112,44 @@ def test_reconcile_skips_already_terminal(mock_verify, mock_update):
     mock_update.assert_not_called()
 
 
+def test_duplicate_submission_resolves_to_single_authoritative_result():
+    # Two concurrent workers observe the same tx hash (duplicate submission).
+    # Both reconcile against the same fake chain state; only one terminal
+    # update must be recorded and the result must be identical.
+    verdict = TxVerificationResult(status="confirmed", confirmations=3, ledger=10, reason="confirmed")
+    with mock.patch("registration_reconcile.verify_transaction", return_value=verdict), \
+            mock.patch("registration_reconcile.update_tx_status", side_effect=[True, False]) as upd:
+        first = reconcile_registration(VALID_TX, previous_status="pending", min_confirmations=1)
+        second = reconcile_registration(VALID_TX, previous_status="pending", min_confirmations=1)
+    assert first["status"] == second["status"] == "confirmed"
+    assert first["updated"] is True
+    assert second["updated"] is False
+    assert upd.call_count == 2
+
+
+def test_delayed_indexing_stays_pending_then_confirms():
+    # Horizon has not indexed the tx yet (404), then indexes it later.
+    with mock.patch("tx_verification.horizon_urls", return_value=["https://horizon.test"]), \
+            mock.patch("tx_verification._fetch_json", side_effect=[(404, None), (200, {"successful": True, "ledger": 50})]), \
+            mock.patch("tx_verification._latest_ledger", return_value=60):
+        first = verify_transaction(VALID_TX, min_confirmations=1)
+        second = verify_transaction(VALID_TX, min_confirmations=1)
+    assert first.status == "missing"
+    assert second.status == "confirmed"
+
+
+def test_replaced_worker_does_not_regress_terminal_state():
+    # A replacement worker sees a previously confirmed row and must not
+    # re-verify or overwrite the authoritative result.
+    with mock.patch("registration_reconcile.verify_transaction") as verify, \
+            mock.patch("registration_reconcile.update_tx_status") as upd:
+        result = reconcile_registration(VALID_TX, previous_status="confirmed")
+    assert result["status"] == "confirmed"
+    assert result["updated"] is False
+    verify.assert_not_called()
+    upd.assert_not_called()
+
+
 def test_reconcile_malformed_hash_is_stable():
     result = reconcile_registration("bad")
     assert result["status"] == "failed"

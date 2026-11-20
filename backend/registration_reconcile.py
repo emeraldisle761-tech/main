@@ -6,6 +6,11 @@ the transaction, or with a stale client-reported `txStatus`. This module is the
 canonical reconciler: it queries Horizon (with failover), applies a confirmation
 depth policy, and updates `tx_status` without creating a second protocol truth.
 
+Race handling: duplicate submissions, delayed indexing and replaced workers all
+converge on a single authoritative terminal status per transaction hash. Once a
+row reaches a terminal status, later reconciliations (from duplicate jobs or a
+replacement worker) observe that status and do not overwrite it unless forced.
+
 Privacy: logs and API responses never include media, metadata envelopes,
 witness values, credentials, or private keys — only status codes and truncated
 transaction hash prefixes.
@@ -108,6 +113,9 @@ def reconcile_registration(
     - Malformed hashes → status ``failed`` / reason ``malformed_tx_hash``
     - Horizon dependency failures → status ``error`` (no durable write)
     - Terminal rows are left unchanged unless ``force`` is true
+    - Terminal writes are conditional at the storage layer, so when duplicate
+      or replacement workers race, exactly one terminal write wins and the
+      losers report ``updated: false`` with the authoritative stored status
     """
     min_conf = (
         default_min_confirmations()
@@ -158,6 +166,15 @@ def reconcile_registration(
 
     if verification.status in TERMINAL_STATUSES:
         updated = bool(update_tx_status(normalized, verification.status, force=force))
+        if not updated and not force:
+            # Another worker (duplicate job or replacement) already committed a
+            # terminal status. Treat that stored value as authoritative.
+            verification = TxVerificationResult(
+                status=previous_status or verification.status,
+                reason="already_terminal",
+                confirmations=verification.confirmations,
+                ledger=verification.ledger,
+            )
         LOGGER.info(
             "registration_reconcile_terminal tx=%s status=%s reason=%s updated=%s",
             _short_hash(normalized),
