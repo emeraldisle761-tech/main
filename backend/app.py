@@ -478,7 +478,7 @@ def create_app() -> Flask:
     upload_session_store = ResumableUploadSessionStore(
         base_dir=resolve_temp_dir(getattr(config, "upload_temp_dir", None)) or tempfile.gettempdir(),
         default_chunk_size=getattr(config, "upload_chunk_bytes", None),
-        default_max_size=config.upload_max_bytes if config.upload_max_bytes is not None else config.max_video_bytes,
+        default_max_size=getattr(config, "upload_max_bytes", None) if getattr(config, "upload_max_bytes", None) is not None else config.max_video_bytes,
     )
 
     @app.before_request
