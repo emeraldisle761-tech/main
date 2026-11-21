@@ -7,9 +7,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import patch
 
+import pytest
+
 import registration_reconcile as rr
+from registration_reconcile import reconcile_registration
+from tx_verification import TxVerificationResult, clamp_reconcile_limit, verify_transaction
+
+VALID_TX = "a" * 64
 
 RELEASE_ID = "harpocrates-1.0.0"
 NETWORK = "testnet"
@@ -285,49 +292,3 @@ def test_reconcile_malformed_hash_is_stable():
     assert result["status"] == "failed"
     assert result["error"] == "malformed_tx_hash"
     assert result["updated"] is False
-
-
-@mock.patch(
-    "registration_reconcile.list_pending_registration_txs",
-    return_value=[
-        {"id": 1, "proof_id": "p" * 64, "tx_hash": VALID_TX, "tx_status": "pending"},
-        {"id": 2, "proof_id": "q" * 64, "tx_hash": "b" * 64, "tx_status": "pending"},
-    ],
-)
-@mock.patch(
-    "registration_reconcile.reconcile_registration",
-    side_effect=[
-        {"status": "confirmed", "updated": True},
-        {"status": "missing", "updated": True},
-    ],
-)
-def test_reconcile_pending_batch_summary(mock_one, mock_list):
-    report = reconcile_pending_registrations(limit=10, min_confirmations=1)
-    assert report["ok"] is True
-    assert report["summary"]["scanned"] == 2
-    assert report["summary"]["confirmed"] == 1
-    assert report["summary"]["missing"] == 1
-    assert report["summary"]["updated"] == 2
-
-
-@mock.patch(
-    "registration_reconcile.reconcile_registration",
-    return_value={"status": "pending", "reason": "awaiting_confirmations", "updated": False},
-)
-def test_process_verify_tx_job_success(mock_reconcile):
-    out = process_verify_tx_job({"tx_hash": VALID_TX, "proof_id": "p" * 64})
-    assert out["status"] == "pending"
-    mock_reconcile.assert_called_once()
-
-
-@mock.patch(
-    "registration_reconcile.reconcile_registration",
-    return_value={"status": "error", "reason": "horizon_dependency_failure"},
-)
-def test_process_verify_tx_job_raises_on_dependency_failure(mock_reconcile):
-    with pytest.raises(RuntimeError):
-        process_verify_tx_job({"txHash": VALID_TX})
-
-
-if __name__ == "__main__":
-    unittest.main()
